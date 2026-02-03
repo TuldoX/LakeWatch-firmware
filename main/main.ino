@@ -2,161 +2,208 @@
 #include <DallasTemperature.h>
 #include <Preferences.h>
 
+
 #define TEMP 32
 #define TDS 34
 #define PH 35
 #define OXYGEN 25
+
 #define uS_TO_S_FACTOR 1000000ULL
 #define TIME_TO_SLEEP  10
+
 #define VREF 3300
 #define ADC_RES 4096
 #define CAL1_V (800)
 #define CAL1_T (22)
+
 #define V_REF 3.3
 #define SCOUNT  30
+
+#define SIM_PIN ""
+#define NETWORK_APN "internet"
+
+#define LILYGO_T_A7670
+#define TINY_GSM_MODEM_A7670
+
+#include <TinyGsmClient.h>
+
+#if defined(LILYGO_T_A7670)
+  #define MODEM_BAUDRATE        115200
+  #define MODEM_DTR_PIN         25
+  #define MODEM_TX_PIN          26
+  #define MODEM_RX_PIN          27
+  #define BOARD_PWRKEY_PIN      4
+  #define BOARD_POWERON_PIN     12
+  #define MODEM_RING_PIN        33
+  #define MODEM_RESET_PIN       5
+  #define MODEM_RESET_LEVEL     HIGH
+  #define SerialAT              Serial1
+#endif
+
+TinyGsm modem(SerialAT);
+Preferences prefs;
+
+const char *API_URL = "https://httpbin.org/post";
+String JWT_TOKEN;
 
 OneWire oneWire(TEMP);
 DallasTemperature sensors(&oneWire);
 
 int analogBuffer[SCOUNT];
 int analogBufferTemp[SCOUNT];
-int analogBufferIndex = 0;
-int copyIndex = 0;
 float averageVoltage = 0;
-float tdsValue = 0;
+int tdsValue = 0;
 
 const float v_pH7 = 2.8;
 const float pH7 = 7.0;
 const float pH_step = -0.67;
 
 const uint16_t DO_Table[41] = {
-    14460, 14220, 13820, 13440, 13090, 12740, 12420, 12110, 11810, 11530,
-    11260, 11010, 10770, 10530, 10300, 10080, 9860, 9660, 9460, 9270,
-    9080, 8900, 8730, 8570, 8410, 8250, 8110, 7960, 7820, 7690,
-    7560, 7430, 7300, 7180, 7070, 6950, 6840, 6730, 6630, 6530, 6410
+  14460,14220,13820,13440,13090,12740,12420,12110,11810,11530,
+  11260,11010,10770,10530,10300,10080,9860,9660,9460,9270,
+  9080,8900,8730,8570,8410,8250,8110,7960,7820,7690,
+  7560,7430,7300,7180,7070,6950,6840,6730,6630,6530,6410
 };
 
 int average(const int arr[], int size) {
   long sum = 0;
   for (int i = 0; i < size; i++) sum += arr[i];
-  return (int)((float)sum / size + 0.5);
+  return sum / size;
 }
 
-int getMedianNum(int bArray[], int iFilterLen){
+int getMedianNum(int bArray[], int iFilterLen) {
   int bTab[iFilterLen];
-  for (byte i = 0; i<iFilterLen; i++)
-    bTab[i] = bArray[i];
-  int i, j, bTemp;
-  for (j = 0; j < iFilterLen - 1; j++) {
-    for (i = 0; i < iFilterLen - j - 1; i++) {
+  memcpy(bTab, bArray, iFilterLen * sizeof(int));
+  for (int j = 0; j < iFilterLen - 1; j++) {
+    for (int i = 0; i < iFilterLen - j - 1; i++) {
       if (bTab[i] > bTab[i + 1]) {
-        bTemp = bTab[i];
+        int t = bTab[i];
         bTab[i] = bTab[i + 1];
-        bTab[i + 1] = bTemp;
+        bTab[i + 1] = t;
       }
     }
   }
-  if ((iFilterLen & 1) > 0){
-    bTemp = bTab[(iFilterLen - 1) / 2];
-  }
-  else {
-    bTemp = (bTab[iFilterLen / 2] + bTab[iFilterLen / 2 - 1]) / 2;
-  }
-  return bTemp;
+  return (iFilterLen & 1) ? bTab[iFilterLen / 2]
+                          : (bTab[iFilterLen / 2] + bTab[iFilterLen / 2 - 1]) / 2;
 }
 
-float measureTDS(float temperature = 21.0){
-  for(int i = 0; i < SCOUNT; i++){
+int measureTDS(float temperature) {
+  for (int i = 0; i < SCOUNT; i++) {
     analogBuffer[i] = analogRead(TDS);
     delay(40);
   }
-  
-  for(copyIndex = 0; copyIndex < SCOUNT; copyIndex++){
-    analogBufferTemp[copyIndex] = analogBuffer[copyIndex];
-  }
-  
-  averageVoltage = getMedianNum(analogBufferTemp, SCOUNT) * (float)V_REF / 4096.0;
-  
-  float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
-  float compensationVoltage = averageVoltage / compensationCoefficient;
-  
-  tdsValue = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage 
-              - 255.86 * compensationVoltage * compensationVoltage 
-              + 857.39 * compensationVoltage) * 0.5;
-  
-  return tdsValue;
+  memcpy(analogBufferTemp, analogBuffer, sizeof(analogBuffer));
+  averageVoltage = getMedianNum(analogBufferTemp, SCOUNT) * V_REF / ADC_RES;
+  float compensation = 1.0 + 0.02 * (temperature - 25.0);
+  float voltage = averageVoltage / compensation;
+  float result = (133.42 * voltage * voltage * voltage - 255.86 * voltage * voltage + 857.39 * voltage) * 0.5;
+  return (int)round(result);
 }
 
 float measurePH() {
-  int measure[30];
-
+  int buf[30];
   for (int i = 0; i < 30; i++) {
-    measure[i] = analogRead(PH);
+    buf[i] = analogRead(PH);
     delay(10);
   }
-
-  int measureAverage = average(measure, 30);
-  float voltage = measureAverage * 3.3 / 4096.0;
-
-  // Correct formula
-  float pH = pH7 + (voltage - v_pH7) / pH_step;
-
-  return pH;
+  float voltage = average(buf, 30) * 3.3 / ADC_RES;
+  return pH7 + (voltage - v_pH7) / pH_step;
 }
 
-int measureDO(float temperature = 21.0) {
-  uint8_t temp_c = (uint8_t)temperature;
-  uint16_t adc_raw = analogRead(OXYGEN);
-  uint16_t adc_voltage = (uint32_t)VREF * adc_raw / ADC_RES;
-  uint16_t v_saturation = (uint32_t)CAL1_V + (uint32_t)35 * temp_c - (uint32_t)CAL1_T * 35;
-  int do_value = (adc_voltage * DO_Table[temp_c]) / v_saturation;
-  return do_value;
+float measureDO(float temperature) {
+  uint8_t t = (uint8_t)temperature;
+  uint16_t adc = analogRead(OXYGEN);
+  uint16_t mv = VREF * adc / ADC_RES;
+  uint16_t vsat = CAL1_V + 35 * t - CAL1_T * 35;
+  return (mv * DO_Table[t]) / vsat / 1000.0;
 }
 
-void setup(){
+String constructJSON(float t, int tds, float ph, float o2) {
+  return "{"
+    "\"id\":" + String(1) + ","
+    "\"temperature\":" + String(t, 1) + ","
+    "\"tds\":" + String(tds)+ ","
+    "\"ph\":" + String(ph, 1) + ","
+    "\"oxygen\":" + String(o2, 1) +
+  "}";
+}
+
+void initModem() {
+  pinMode(BOARD_POWERON_PIN, OUTPUT);
+  digitalWrite(BOARD_POWERON_PIN, HIGH);
+
+  pinMode(MODEM_RESET_PIN, OUTPUT);
+  digitalWrite(MODEM_RESET_PIN, !MODEM_RESET_LEVEL);
+  delay(100);
+  digitalWrite(MODEM_RESET_PIN, MODEM_RESET_LEVEL);
+  delay(2600);
+
+  pinMode(BOARD_PWRKEY_PIN, OUTPUT);
+  digitalWrite(BOARD_PWRKEY_PIN, HIGH);
+  delay(500);
+
+  SerialAT.begin(MODEM_BAUDRATE, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
+
+  while (!modem.testAT()) delay(500);
+}
+
+bool connectNetwork() {
+  while (modem.getSimStatus() != SIM_READY) delay(1000);
+
+  modem.sendAT("+CGDCONT=1,\"IP\",\"", NETWORK_APN, "\"");
+  modem.waitResponse();
+
+  while (!modem.isNetworkConnected()) delay(1000);
+  modem.setNetworkActive();
+
+  modem.https_begin();
+  return true;
+}
+
+bool sendDataToAPI(float t, int tds, float ph, float o2, String token) {
+  String payload = constructJSON(t, tds, ph, o2);
+  Serial.println(payload);
+
+  if (!modem.https_set_url(API_URL)) return false;
+
+  modem.sendAT("+HTTPPARA=\"CONTENT\",\"application/json\"");
+  modem.waitResponse();
+
+  modem.sendAT("+HTTPPARA=\"USERDATA\",\"Authorization: Bearer ", token, "\"");
+  modem.waitResponse();
+
+  int code = modem.https_post(payload);
+  Serial.println(code);
+  Serial.println(modem.https_body());
+
+  return (code == 200 || code == 201);
+}
+
+void setup() {
   Serial.begin(115200);
-  delay(2000);
   sensors.begin();
+
+  prefs.begin("app", false);
+  String token = prefs.getString("token", "DEFAULT");
+
+  initModem();
+  connectNetwork();
 
   analogSetPinAttenuation(PH, ADC_11db);
   analogSetPinAttenuation(TDS, ADC_11db);
   analogSetPinAttenuation(OXYGEN, ADC_11db);
   analogReadResolution(12);
 
-  esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
-
-  sensors.requestTemperatures(); 
-  float temperature = sensors.getTempCByIndex(0);
-  delay(1000);
-
-  pinMode(TDS, INPUT);
-  float tds = measureTDS(temperature);
-  delay(1000);
-
+  sensors.requestTemperatures();
+  float temp = sensors.getTempCByIndex(0);
+  int tds = measureTDS(temp);
   float ph = measurePH();
-  delay(1000);
+  float o2 = measureDO(temp);
 
-  int do_value_ugL = measureDO(temperature);
-  float oxygen = do_value_ugL / 1000.0; //mg/L
-  delay(1000);
+  sendDataToAPI(temp, tds, ph, o2,token);
 
-  Serial.print("Temperature: ");
-  Serial.print(temperature);
-  Serial.println("°C");
-
-  Serial.print("TDS: ");
-  Serial.print(tds);
-  Serial.println(" ppm");
-
-  Serial.print("pH: ");
-  Serial.println(ph);
-
-  Serial.print("Oxygen: ");
-  Serial.print(oxygen);
-  Serial.println(" mg/L");
-
-  delay(5000);
+  esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
   esp_deep_sleep_start();
 }
 
-void loop(){}
+void loop() {}
