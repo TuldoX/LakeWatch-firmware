@@ -5,8 +5,9 @@
 
 #define TEMP 32
 #define TDS 34
-#define PH 35
+#define PH 26
 #define OXYGEN 25
+#define BATTERY 35
 
 #define uS_TO_S_FACTOR 1000000ULL
 #define TIME_TO_SLEEP  10
@@ -118,9 +119,10 @@ float measureDO(float temperature) {
   return (mv * DO_Table[t]) / vsat / 1000.0;
 }
 
-String constructJSON(float t, int tds, float ph, float o2) {
+String constructJSON(float t, int tds, float ph, float o2,int percentage) {
   return "{"
     "\"id\":" + String(1) + ","
+    "\"batteryLife\":" + String(percentage) + ","
     "\"temperature\":" + String(t, 1) + ","
     "\"tds\":" + String(tds)+ ","
     "\"ph\":" + String(ph, 1) + ","
@@ -160,8 +162,8 @@ bool connectNetwork() {
   return true;
 }
 
-bool sendDataToAPI(float t, int tds, float ph, float o2, String token) {
-  String payload = constructJSON(t, tds, ph, o2);
+bool sendDataToAPI(float t, int tds, float ph, float o2, String token,int percent) {
+  String payload = constructJSON(t, tds, ph, o2,percent);
   Serial.println(payload);
 
   if (!modem.https_set_url(API_URL)) return false;
@@ -179,6 +181,31 @@ bool sendDataToAPI(float t, int tds, float ph, float o2, String token) {
   return (code == 200 || code == 201);
 }
 
+float readBatteryVoltage() {
+  long sum = 0;
+  for (int i = 0; i < 15; i++) {
+    sum += analogRead(BATTERY);
+    delay(3);
+  }
+
+  float raw = sum / 15.0;
+  float adcV = (raw / 4095.0) * 3.3;
+  return adcV * 2.0;   // voltage divider on LILYGO
+}
+
+int batteryPercent(float v) {
+  if (v >= 4.20) return 100;
+  if (v >= 4.10) return 90;
+  if (v >= 4.00) return 80;
+  if (v >= 3.90) return 70;
+  if (v >= 3.80) return 60;
+  if (v >= 3.70) return 50;
+  if (v >= 3.60) return 35;
+  if (v >= 3.50) return 20;
+  if (v >= 3.40) return 10;
+  return 0;
+}
+
 void setup() {
   Serial.begin(115200);
   sensors.begin();
@@ -186,12 +213,10 @@ void setup() {
   prefs.begin("app", false);
   String token = prefs.getString("token", "DEFAULT");
 
-  initModem();
-  connectNetwork();
-
   analogSetPinAttenuation(PH, ADC_11db);
   analogSetPinAttenuation(TDS, ADC_11db);
   analogSetPinAttenuation(OXYGEN, ADC_11db);
+  analogSetPinAttenuation(BATTERY, ADC_11db);
   analogReadResolution(12);
 
   sensors.requestTemperatures();
@@ -200,7 +225,12 @@ void setup() {
   float ph = measurePH();
   float o2 = measureDO(temp);
 
-  sendDataToAPI(temp, tds, ph, o2,token);
+  float voltage = readBatteryVoltage();
+  int percent = batteryPercent(voltage);
+
+  initModem();
+  connectNetwork();
+  sendDataToAPI(temp, tds, ph, o2,token,percent);
 
   esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
   esp_deep_sleep_start();
