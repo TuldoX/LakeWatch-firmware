@@ -5,12 +5,12 @@
 
 #define TEMP 32
 #define TDS 34
-#define PH 26
-#define OXYGEN 25
+#define PH 36
+#define OXYGEN 39
 #define BATTERY 35
 
 #define uS_TO_S_FACTOR 1000000ULL
-#define TIME_TO_SLEEP  10
+#define TIME_TO_SLEEP  3600
 
 #define VREF 3300
 #define ADC_RES 4096
